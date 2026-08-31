@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeWebReadableStream } from "node:stream/web";
-import { forwardSigned } from "./forward.js";
+import { forwardSigned, parseTargetUrl } from "./forward.js";
 import { DEFAULT_FORWARDED_REQUEST_HEADERS, DEFAULT_FORWARDED_RESPONSE_HEADERS } from "./headers.js";
 import { jsonRpcErrorString, parseRequestId } from "./jsonrpc.js";
 import { createRequestSigner, type SignerConfig } from "./signer.js";
@@ -40,6 +40,10 @@ const METHODS_WITHOUT_BODY = new Set(["GET", "HEAD", "DELETE", "OPTIONS"]);
  */
 export async function startSigV4Proxy(options: SigV4ProxyOptions): Promise<SigV4Proxy> {
   const host = options.host ?? "127.0.0.1";
+  // Resolved once at startup from operator config. Every forwarded request goes here
+  // regardless of the incoming request's path, so client input can never redirect the
+  // upstream fetch (no SSRF surface).
+  const target = parseTargetUrl(options.targetUrl);
   const path = normalizePath(options.path);
   const requestAllowlist = (options.forwardRequestHeaders ?? DEFAULT_FORWARDED_REQUEST_HEADERS).map((h) => h.toLowerCase());
   const responseAllowlist = (options.forwardResponseHeaders ?? DEFAULT_FORWARDED_RESPONSE_HEADERS).map((h) => h.toLowerCase());
@@ -48,11 +52,12 @@ export async function startSigV4Proxy(options: SigV4ProxyOptions): Promise<SigV4
 
   const server = createServer((req, res) => {
     handleRequest(req, res).catch((err: unknown) => {
+      console.error("SigV4 proxy request failed:", err);
       if (!res.headersSent) {
         res.statusCode = 500;
         res.setHeader("content-type", "application/json");
       }
-      res.end(jsonRpcErrorString(null, err instanceof Error ? err.message : String(err), -32603));
+      res.end(jsonRpcErrorString(null, "Internal server error", -32603));
     });
   });
 
@@ -76,12 +81,13 @@ export async function startSigV4Proxy(options: SigV4ProxyOptions): Promise<SigV4
 
     let upstream: Response;
     try {
-      upstream = await forwardSigned(sign, options.targetUrl, { method, headers, body, signal: abort.signal, fetchImpl });
+      upstream = await forwardSigned(sign, target, { method, headers, body, signal: abort.signal, fetchImpl });
     } catch (err) {
       if (abort.signal.aborted) return;
+      console.error("SigV4 proxy could not reach upstream:", err);
       res.statusCode = 502;
       res.setHeader("content-type", "application/json");
-      res.end(jsonRpcErrorString(parseRequestId(body), `SigV4 proxy could not reach upstream: ${(err as Error).message}`));
+      res.end(jsonRpcErrorString(parseRequestId(body), "Upstream service unavailable"));
       return;
     }
 

@@ -107,11 +107,70 @@ test("returns a JSON-RPC error envelope when the upstream is unreachable", async
     body: JSON.stringify({ jsonrpc: "2.0", id: 42, method: "ping" }),
   });
   assert.equal(res.status, 502);
-  const payload = (await res.json()) as { jsonrpc: string; id: unknown; error: { code: number; message: string } };
+  const raw = await res.text();
+  const payload = JSON.parse(raw) as { jsonrpc: string; id: unknown; error: { code: number; message: string } };
   assert.equal(payload.jsonrpc, "2.0");
   assert.equal(payload.id, 42);
   assert.equal(payload.error.code, -32001);
-  assert.match(payload.error.message, /could not reach upstream/);
+  assert.equal(payload.error.message, "Upstream service unavailable");
+  // Regression: raw internal error details must not leak to the client.
+  assert.doesNotMatch(raw, /ECONNREFUSED|fetch failed|127\.0\.0\.1|localhost|:\d{4,5}/);
+});
+
+test("does not leak raw internal error details on an unhandled failure", async () => {
+  const upstream = await startMockUpstream((_req, res) => res.end("{}"));
+  const boom = new Error("secret-host.internal.example:5432 connection string leaked");
+  const proxy = await startSigV4Proxy({
+    targetUrl: upstream.url,
+    service: "bedrock-agentcore",
+    region: "us-east-1",
+    credentials: TEST_CREDENTIALS,
+    fetch: (() => {
+      throw boom;
+    }) as unknown as typeof fetch,
+  });
+  track(proxy, upstream);
+
+  const res = await fetch(proxy.url, {
+    method: "POST",
+    body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "ping" }),
+  });
+  const raw = await res.text();
+  const payload = JSON.parse(raw) as { jsonrpc: string; error: { code: number; message: string } };
+  assert.equal(payload.jsonrpc, "2.0");
+  assert.ok(payload.error.message === "Internal server error" || payload.error.message === "Upstream service unavailable");
+  assert.doesNotMatch(raw, /secret-host\.internal\.example|connection string leaked/);
+});
+
+test("forwards every request path to the configured target (no client-controlled URL)", async () => {
+  const upstream = await startMockUpstream((_req, res) => res.end("{}"));
+  const proxy = await startSigV4Proxy({
+    targetUrl: upstream.url, // ends with /mcp
+    service: "bedrock-agentcore",
+    region: "us-east-1",
+    credentials: TEST_CREDENTIALS,
+  });
+  track(proxy, upstream);
+
+  const base = new URL(proxy.url);
+  await fetch(new URL("/evil.example/path?x=1", base), { method: "POST", body: "{}" });
+  await fetch(new URL("/anything/else", base), { method: "POST", body: "{}" });
+
+  assert.equal(upstream.requests.length, 2);
+  for (const seen of upstream.requests) assert.equal(seen.url, "/mcp");
+});
+
+test("rejects a non-http(s) target URL at startup", async () => {
+  await assert.rejects(
+    () =>
+      startSigV4Proxy({
+        targetUrl: "file:///etc/passwd",
+        service: "bedrock-agentcore",
+        region: "us-east-1",
+        credentials: TEST_CREDENTIALS,
+      }),
+    /Unsupported target URL protocol/,
+  );
 });
 
 test("forwards GET (no body) for the standalone SSE stream", async () => {
