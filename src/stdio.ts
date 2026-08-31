@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import { forwardSigned } from "./forward.js";
+import { forwardSigned, parseTargetUrl } from "./forward.js";
 import { jsonRpcError, type JsonRpcId } from "./jsonrpc.js";
 import { parseSseStream } from "./sse.js";
 import { createRequestSigner, type SignerConfig } from "./signer.js";
@@ -42,6 +42,7 @@ export async function startStdioProxy(options: StdioProxyOptions): Promise<Stdio
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
   const fetchImpl = options.fetch ?? fetch;
+  const target = parseTargetUrl(options.targetUrl);
   const sign = createRequestSigner(options);
   const abort = new AbortController();
   const reportError =
@@ -102,7 +103,7 @@ export async function startStdioProxy(options: StdioProxyOptions): Promise<Stdio
 
     let response: Response;
     try {
-      response = await forwardSigned(sign, options.targetUrl, {
+      response = await forwardSigned(sign, target, {
         method: "POST",
         headers: { ...upstreamHeaders("application/json, text/event-stream"), "content-type": "application/json" },
         body: Buffer.from(line, "utf8"),
@@ -157,7 +158,7 @@ export async function startStdioProxy(options: StdioProxyOptions): Promise<Stdio
   async function runServerStream(): Promise<void> {
     let response: Response;
     try {
-      response = await forwardSigned(sign, options.targetUrl, {
+      response = await forwardSigned(sign, target, {
         method: "GET",
         headers: upstreamHeaders("text/event-stream"),
         signal: abort.signal,
