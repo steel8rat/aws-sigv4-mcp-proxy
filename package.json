@@ -1,0 +1,70 @@
+{
+  "name": "aws-sigv4-mcp-proxy",
+  "version": "0.1.0",
+  "description": "Bridge plain-HTTP or stdio MCP clients to AWS SigV4-gated MCP endpoints (Bedrock AgentCore, API Gateway, Lambda Function URLs).",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "aws",
+    "sigv4",
+    "bedrock-agentcore",
+    "proxy",
+    "iam"
+  ],
+  "license": "MIT",
+  "author": "steel8rat",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/steel8rat/aws-sigv4-mcp-proxy.git"
+  },
+  "homepage": "https://github.com/steel8rat/aws-sigv4-mcp-proxy#readme",
+  "bugs": {
+    "url": "https://github.com/steel8rat/aws-sigv4-mcp-proxy/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "aws-sigv4-mcp-proxy": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "CHANGELOG.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pretest": "npm run build",
+    "test": "node --test \"tests/*.test.ts\""
+  },
+  "dependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0",
+    "@smithy/signature-v4": "^4.2.4",
+    "@smithy/types": "^3.7.2"
+  },
+  "peerDependencies": {
+    "@aws-sdk/credential-provider-node": "^3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/credential-provider-node": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@aws-sdk/credential-provider-node": "^3.0.0",
+    "@types/node": "^20.19.0",
+    "typescript": "^5.6.0"
+  }
+}
