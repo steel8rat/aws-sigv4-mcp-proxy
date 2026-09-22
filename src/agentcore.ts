@@ -1,6 +1,7 @@
 import { startSigV4Proxy, type SigV4Proxy } from "./proxy.js";
 import { startStdioProxy, type StdioProxy } from "./stdio.js";
 import type { SignerConfig } from "./signer.js";
+import type { EmptyResponseRetryOptions } from "./empty.js";
 
 /** SigV4 service name for the Bedrock AgentCore data plane. */
 export const AGENT_CORE_SERVICE = "bedrock-agentcore";
@@ -46,6 +47,13 @@ export function agentCoreInvocationUrl(runtimeArn: string, options: AgentCoreUrl
 export interface AgentCoreProxyOptions extends Partial<SignerConfig>, AgentCoreUrlOptions {
   /** ARN of the deployed Bedrock AgentCore runtime to invoke. */
   runtimeArn: string;
+  /**
+   * Replay a JSON-RPC request that gets HTTP 200 with an empty body before reporting
+   * it as an error. Default off, as for the generic proxies: a replay is at-least-once.
+   */
+  retryEmptyResponse?: boolean | EmptyResponseRetryOptions;
+  /** Called with non-fatal warnings such as retries. */
+  onWarn?: (message: string) => void;
 }
 
 export interface AgentCoreHttpProxyOptions extends AgentCoreProxyOptions {
@@ -80,6 +88,8 @@ export function startAgentCoreProxy(options: AgentCoreHttpProxyOptions): Promise
     host: options.host,
     path: options.path,
     fetch: options.fetch,
+    retryEmptyResponse: options.retryEmptyResponse,
+    onWarn: options.onWarn,
   });
 }
 
@@ -104,6 +114,8 @@ export function startAgentCoreStdioProxy(
     fetch: options.fetch,
     protocolVersion: options.protocolVersion,
     serverStream: options.serverStream,
+    retryEmptyResponse: options.retryEmptyResponse,
+    onWarn: options.onWarn,
   });
 }
 

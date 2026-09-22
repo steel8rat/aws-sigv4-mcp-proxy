@@ -25,6 +25,8 @@ Options:
   --qualifier <name>         AgentCore runtime qualifier (default: DEFAULT)
   --protocol-version <ver>   initial MCP-Protocol-Version header (stdio mode)
   --no-server-stream         do not open a standalone GET SSE stream (stdio mode)
+  --retry-empty-response     replay a request answered with an empty HTTP 200 (up to 3
+                             attempts); at-least-once: a lost tool call may run twice
   --port <n>                 local port (http mode; default: ephemeral)
   --host <addr>              local bind address (http mode; default: 127.0.0.1)
   --path <path>              local path to advertise (http mode; default: /mcp)
@@ -51,6 +53,7 @@ const { values, positionals } = parseArgs({
     qualifier: { type: "string" },
     "protocol-version": { type: "string" },
     "no-server-stream": { type: "boolean", default: false },
+    "retry-empty-response": { type: "boolean", default: false },
     port: { type: "string" },
     host: { type: "string" },
     path: { type: "string" },
@@ -117,6 +120,7 @@ if (values.http) {
     port: values.port ? Number(values.port) : undefined,
     host: values.host,
     path: values.path,
+    retryEmptyResponse: values["retry-empty-response"],
   });
   process.stderr.write(`[aws-sigv4-mcp-proxy] listening on ${proxy.url} -> ${targetUrl}\n`);
   for (const signal of shutdownSignals) {
@@ -131,6 +135,7 @@ if (values.http) {
     region,
     protocolVersion: values["protocol-version"],
     serverStream: !values["no-server-stream"],
+    retryEmptyResponse: values["retry-empty-response"],
   });
   process.stderr.write(`[aws-sigv4-mcp-proxy] stdio bridge -> ${targetUrl}\n`);
   for (const signal of shutdownSignals) {

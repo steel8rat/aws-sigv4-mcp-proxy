@@ -100,6 +100,7 @@ aws-sigv4-mcp-proxy --http --port 9100 \
 | `--qualifier` | AgentCore runtime qualifier (default `DEFAULT`) |
 | `--protocol-version` | Initial `MCP-Protocol-Version` header (stdio mode; updated from the `initialize` result) |
 | `--no-server-stream` | Do not open a standalone GET SSE stream for server-initiated messages (stdio mode) |
+| `--retry-empty-response` | Replay a request answered with an empty HTTP 200, up to 3 attempts — see [Empty responses](#empty-responses) |
 | `--port` / `--host` / `--path` | HTTP listener bind settings (default `127.0.0.1`, ephemeral port, `/mcp`) |
 
 ## Programmatic API
@@ -183,16 +184,60 @@ entirely with `startSigV4Proxy` + your own `targetUrl`.
   response is returned to the client as
   `{ "jsonrpc": "2.0", "id": <request id>, "error": { "code": -32001, "message": … } }`
   rather than a bare HTTP failure.
+- **Empty responses are reported, not passed through.** See below.
 - **Header allowlist.** Request: `content-type`, `accept` (forced to
   `application/json, text/event-stream` when missing or `*/*`), `mcp-session-id`,
   `mcp-protocol-version`, `last-event-id`. Response: `content-type`,
   `cache-control`, `mcp-session-id`, `mcp-protocol-version`, `www-authenticate`.
   Both lists are overridable via `forwardRequestHeaders` / `forwardResponseHeaders`.
 
+## Empty responses
+
+An upstream can answer a JSON-RPC request with HTTP 200 and an empty body. MCP
+clients then report a bare `Transport closed`, or — over stdio — wait forever.
+Against Bedrock AgentCore this is how a failed or not-yet-listening container
+surfaces: the platform masks the container's error as an empty 200.
+
+**Reporting (always on).** When a request that is owed a response — a `POST` of a
+single JSON-RPC request with a `method` and an `id` — gets none, the proxy answers
+with a JSON-RPC error instead of silence:
+
+```json
+{ "jsonrpc": "2.0", "id": 1, "error": { "code": -32603, "message": "Upstream returned HTTP 200 with an empty body" } }
+```
+
+- The HTTP status stays `200`, as JSON-RPC carries errors in the body. If the
+  upstream declared `text/event-stream`, the error is sent as one SSE `message`
+  event; otherwise as `application/json`.
+- "Empty" means no non-whitespace byte before the body ends. Only the leading
+  bytes are read to decide this; SSE bodies keep streaming.
+- In stdio mode, an SSE response that ends without a message answering the
+  request produces `-32603 "Upstream stream ended without a response"`.
+- Notifications, client responses, batches, `GET` streams and `DELETE` pass an
+  empty 200 through unchanged — for them it is legitimate.
+
+**Retry (off by default).** `retryEmptyResponse: true` (or
+`{ attempts, backoffMs }`, defaults 3 total attempts and 150ms; CLI
+`--retry-empty-response`) replays the identical signed request after an empty
+200, with exponential, fully jittered backoff, before falling back to the error
+above. Each retry is logged through `onWarn`.
+
+> [!WARNING]
+> Retrying trades at-most-once for **at-least-once** execution. A container that
+> dies while writing its response has already run the tool, so a replay of a
+> write tool applies it twice. MCP has no idempotency key that could make the
+> replay safe (see SEP-1335 in `modelcontextprotocol/modelcontextprotocol`).
+> The retry also hides container faults that the error would have surfaced —
+> leave it off unless your tools are idempotent, and investigate the upstream
+> either way.
+
 ### Limitations
 
 - SSE resumption via `Last-Event-ID` is passed through but the standalone
   server-stream does not yet reconnect automatically on drop.
+- In HTTP mode, an SSE body is judged empty only by its bytes: a stream carrying
+  just keep-alive comments or events without a response is passed through, not
+  reported. (stdio mode parses the stream and does report it.)
 - The HTTP listener is unauthenticated; bind it to loopback (the default) and
   treat it as a local-only shim.
 

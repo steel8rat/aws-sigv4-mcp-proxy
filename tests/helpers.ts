@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { PassThrough } from "node:stream";
 
 export const TEST_CREDENTIALS = {
   accessKeyId: "AKIAIOSFODNN7EXAMPLE",
@@ -59,4 +60,39 @@ export async function readAll(stream: NodeJS.ReadableStream): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of stream) chunks.push(chunk as Buffer);
   return Buffer.concat(chunks).toString("utf8");
+}
+
+/** Reads newline-delimited JSON messages off a stream, one `take()` at a time. */
+export class MessageReader {
+  private buffer = "";
+  private readonly pending: unknown[] = [];
+  private readonly waiters: Array<(value: unknown) => void> = [];
+
+  constructor(stream: PassThrough) {
+    stream.on("data", (chunk: Buffer) => {
+      this.buffer += chunk.toString("utf8");
+      let nl: number;
+      while ((nl = this.buffer.indexOf("\n")) !== -1) {
+        const line = this.buffer.slice(0, nl).trim();
+        this.buffer = this.buffer.slice(nl + 1);
+        if (!line) continue;
+        const message = JSON.parse(line);
+        const waiter = this.waiters.shift();
+        if (waiter) waiter(message);
+        else this.pending.push(message);
+      }
+    });
+  }
+
+  take(): Promise<unknown> {
+    const ready = this.pending.shift();
+    if (ready !== undefined) return Promise.resolve(ready);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("timed out waiting for a message")), 2000);
+      this.waiters.push((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      });
+    });
+  }
 }

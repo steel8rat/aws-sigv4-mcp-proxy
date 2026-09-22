@@ -32,3 +32,27 @@ export function jsonRpcError(id: JsonRpcId, message: string, code = -32001): {
 export function jsonRpcErrorString(id: JsonRpcId, message: string, code = -32001): string {
   return JSON.stringify(jsonRpcError(id, message, code));
 }
+
+/**
+ * The `id` of a JSON-RPC message that is owed a response — a single request
+ * carrying both a `method` and an `id` — or `null` for anything else (a
+ * notification, a client's response to a server request, a batch, or an
+ * unparseable body).
+ */
+export function owedResponseId(body: Uint8Array | string): JsonRpcId {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(typeof body === "string" ? body : Buffer.from(body).toString("utf8"));
+  } catch {
+    return null;
+  }
+  return owedResponseIdOf(parsed);
+}
+
+/** {@link owedResponseId} for an already-parsed message. */
+export function owedResponseIdOf(message: unknown): JsonRpcId {
+  if (message === null || typeof message !== "object" || Array.isArray(message)) return null;
+  const { id, method } = message as { id?: unknown; method?: unknown };
+  if (typeof method !== "string") return null;
+  return typeof id === "string" || typeof id === "number" ? id : null;
+}

@@ -1,6 +1,13 @@
 import { createInterface } from "node:readline";
+import {
+  EMPTY_RESPONSE_CODE,
+  EMPTY_RESPONSE_MESSAGE,
+  resolveRetryOptions,
+  withEmptyResponseRetry,
+  type EmptyResponseRetryOptions,
+} from "./empty.js";
 import { forwardSigned, parseTargetUrl } from "./forward.js";
-import { jsonRpcError, type JsonRpcId } from "./jsonrpc.js";
+import { jsonRpcError, owedResponseIdOf, type JsonRpcId } from "./jsonrpc.js";
 import { parseSseStream } from "./sse.js";
 import { createRequestSigner, type SignerConfig } from "./signer.js";
 
@@ -23,7 +30,18 @@ export interface StdioProxyOptions extends SignerConfig {
   serverStream?: boolean;
   /** Called for recoverable errors (default: write to `process.stderr`). */
   onError?: (error: Error) => void;
+  /**
+   * Replay a JSON-RPC request that gets HTTP 200 with an empty body before reporting
+   * it as an error. Default off: a replay is at-least-once, so a tool whose response
+   * was lost may run twice. `true` uses 3 attempts with a 150ms backoff.
+   */
+  retryEmptyResponse?: boolean | EmptyResponseRetryOptions;
+  /** Called with non-fatal warnings such as retries (default: write to `process.stderr`). */
+  onWarn?: (message: string) => void;
 }
+
+/** Message of the JSON-RPC error sent when an SSE response ends without answering the request. */
+const NO_RESPONSE_IN_STREAM_MESSAGE = "Upstream stream ended without a response";
 
 export interface StdioProxy {
   /** Resolves once the input stream has ended and every in-flight message has been flushed. */
@@ -41,7 +59,14 @@ export interface StdioProxy {
 export async function startStdioProxy(options: StdioProxyOptions): Promise<StdioProxy> {
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
-  const fetchImpl = options.fetch ?? fetch;
+  const warn =
+    options.onWarn ??
+    ((message: string) => {
+      process.stderr.write(`[aws-sigv4-mcp-proxy] ${message}\n`);
+    });
+  const retry = resolveRetryOptions(options.retryEmptyResponse);
+  const baseFetch = options.fetch ?? fetch;
+  const fetchImpl = retry ? withEmptyResponseRetry(baseFetch, retry, warn) : baseFetch;
   const target = parseTargetUrl(options.targetUrl);
   const sign = createRequestSigner(options);
   const abort = new AbortController();
@@ -78,17 +103,27 @@ export async function startStdioProxy(options: StdioProxyOptions): Promise<Stdio
     return headers;
   }
 
-  async function drainSse(response: Response): Promise<void> {
-    if (!response.body) return;
+  /**
+   * Forward every SSE message to the client. Returns whether one of them answered
+   * `requestId` (a result or error carrying that id).
+   */
+  async function drainSse(response: Response, requestId: JsonRpcId = null): Promise<boolean> {
+    let answered = false;
+    if (!response.body) return answered;
     for await (const event of parseSseStream(response.body as unknown as ReadableStream<Uint8Array>)) {
       if (event.event !== undefined && event.event !== "message") continue;
       if (!event.data) continue;
+      let message: unknown;
       try {
-        send(JSON.parse(event.data));
+        message = JSON.parse(event.data);
       } catch {
         reportError(new Error(`Discarding non-JSON SSE data from upstream: ${event.data.slice(0, 200)}`));
+        continue;
       }
+      if (requestId !== null && answersRequest(message, requestId)) answered = true;
+      send(message);
     }
+    return answered;
   }
 
   async function handleClientLine(line: string): Promise<void> {
@@ -100,6 +135,8 @@ export async function startStdioProxy(options: StdioProxyOptions): Promise<Stdio
       return;
     }
     const id = jsonRpcIdOf(message);
+    // Only a request (method + id) is owed a response; silence to anything else is fine.
+    const owedId = owedResponseIdOf(message);
 
     let response: Response;
     try {
@@ -132,8 +169,13 @@ export async function startStdioProxy(options: StdioProxyOptions): Promise<Stdio
     }
 
     const contentType = response.headers.get("content-type") ?? "";
+    // An owed response that never arrives must become an error, or the client
+    // waits forever for it.
     if (contentType.includes("text/event-stream")) {
-      await drainSse(response);
+      const answered = await drainSse(response, owedId);
+      if (owedId !== null && !answered && !abort.signal.aborted) {
+        send(jsonRpcError(owedId, NO_RESPONSE_IN_STREAM_MESSAGE, EMPTY_RESPONSE_CODE));
+      }
     } else {
       const text = await response.text();
       if (text.trim()) {
@@ -142,6 +184,8 @@ export async function startStdioProxy(options: StdioProxyOptions): Promise<Stdio
         } catch {
           reportError(new Error(`Upstream sent a non-JSON body: ${text.slice(0, 200)}`));
         }
+      } else if (owedId !== null) {
+        send(jsonRpcError(owedId, EMPTY_RESPONSE_MESSAGE, EMPTY_RESPONSE_CODE));
       }
     }
     startServerStream();
@@ -218,6 +262,12 @@ function jsonRpcIdOf(message: unknown): JsonRpcId {
     if (typeof id === "string" || typeof id === "number") return id;
   }
   return null;
+}
+
+function answersRequest(message: unknown, id: JsonRpcId): boolean {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return false;
+  const candidate = message as { id?: unknown; result?: unknown; error?: unknown };
+  return candidate.id === id && ("result" in candidate || "error" in candidate);
 }
 
 async function safeText(response: Response): Promise<string> {
