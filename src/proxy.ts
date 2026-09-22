@@ -1,9 +1,18 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeWebReadableStream } from "node:stream/web";
+import {
+  EMPTY_RESPONSE_CODE,
+  EMPTY_RESPONSE_MESSAGE,
+  isOwedResponse,
+  peekResponse,
+  resolveRetryOptions,
+  withEmptyResponseRetry,
+  type EmptyResponseRetryOptions,
+} from "./empty.js";
 import { forwardSigned, parseTargetUrl } from "./forward.js";
 import { DEFAULT_FORWARDED_REQUEST_HEADERS, DEFAULT_FORWARDED_RESPONSE_HEADERS } from "./headers.js";
-import { jsonRpcErrorString, parseRequestId } from "./jsonrpc.js";
+import { jsonRpcErrorString, owedResponseId, parseRequestId } from "./jsonrpc.js";
 import { createRequestSigner, type SignerConfig } from "./signer.js";
 
 export interface SigV4ProxyOptions extends SignerConfig {
@@ -21,6 +30,14 @@ export interface SigV4ProxyOptions extends SignerConfig {
   forwardResponseHeaders?: readonly string[];
   /** Inject a custom `fetch` (used by tests). */
   fetch?: typeof fetch;
+  /**
+   * Replay a JSON-RPC request that gets HTTP 200 with an empty body before reporting
+   * it as an error. Default off: a replay is at-least-once, so a tool whose response
+   * was lost may run twice. `true` uses 3 attempts with a 150ms backoff.
+   */
+  retryEmptyResponse?: boolean | EmptyResponseRetryOptions;
+  /** Called with non-fatal warnings such as retries (default: `console.warn` with the package prefix). */
+  onWarn?: (message: string) => void;
 }
 
 export interface SigV4Proxy {
@@ -48,7 +65,10 @@ export async function startSigV4Proxy(options: SigV4ProxyOptions): Promise<SigV4
   const requestAllowlist = (options.forwardRequestHeaders ?? DEFAULT_FORWARDED_REQUEST_HEADERS).map((h) => h.toLowerCase());
   const responseAllowlist = (options.forwardResponseHeaders ?? DEFAULT_FORWARDED_RESPONSE_HEADERS).map((h) => h.toLowerCase());
   const sign = createRequestSigner(options);
-  const fetchImpl = options.fetch ?? fetch;
+  const warn = options.onWarn ?? ((message: string) => console.warn(`[aws-sigv4-mcp-proxy] ${message}`));
+  const retry = resolveRetryOptions(options.retryEmptyResponse);
+  const baseFetch = options.fetch ?? fetch;
+  const fetchImpl = retry ? withEmptyResponseRetry(baseFetch, retry, warn) : baseFetch;
 
   const server = createServer((req, res) => {
     handleRequest(req, res).catch((err: unknown) => {
@@ -91,11 +111,29 @@ export async function startSigV4Proxy(options: SigV4ProxyOptions): Promise<SigV4
       return;
     }
 
-    res.statusCode = upstream.status;
-    for (const name of responseAllowlist) {
-      const value = upstream.headers.get(name);
-      if (value !== null) res.setHeader(name, value);
+    // A request that is owed a response must not be answered with silence: peek
+    // the body before committing headers, and report an empty one as an error.
+    if (upstream.status === 200 && isOwedResponse(method, body)) {
+      const peeked = await peekResponse(upstream);
+      upstream = peeked.response;
+      if (peeked.empty) {
+        copyResponseHeaders(upstream, res);
+        res.statusCode = 200;
+        const error = jsonRpcErrorString(owedResponseId(body!), EMPTY_RESPONSE_MESSAGE, EMPTY_RESPONSE_CODE);
+        // Match the framing the client already expects from the declared content type.
+        if ((upstream.headers.get("content-type") ?? "").includes("text/event-stream")) {
+          res.setHeader("content-type", "text/event-stream");
+          res.end(`event: message\ndata: ${error}\n\n`);
+        } else {
+          res.setHeader("content-type", "application/json");
+          res.end(error);
+        }
+        return;
+      }
     }
+
+    res.statusCode = upstream.status;
+    copyResponseHeaders(upstream, res);
 
     if (!upstream.body) {
       res.end();
@@ -107,6 +145,13 @@ export async function startSigV4Proxy(options: SigV4ProxyOptions): Promise<SigV4
     } catch {
       // Client hung up or upstream aborted mid-stream; nothing useful to send.
       res.destroy();
+    }
+  }
+
+  function copyResponseHeaders(upstream: Response, res: ServerResponse): void {
+    for (const name of responseAllowlist) {
+      const value = upstream.headers.get(name);
+      if (value !== null) res.setHeader(name, value);
     }
   }
 

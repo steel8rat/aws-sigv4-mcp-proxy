@@ -2,47 +2,12 @@ import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { afterEach, test } from "node:test";
 import { startStdioProxy, type StdioProxy } from "../dist/stdio.js";
-import { startMockUpstream, TEST_CREDENTIALS, type MockUpstream } from "./helpers.ts";
+import { MessageReader, startMockUpstream, TEST_CREDENTIALS, type MockUpstream } from "./helpers.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   while (cleanups.length) await cleanups.pop()!().catch(() => {});
 });
-
-/** Reads newline-delimited JSON messages off a stream, one `take()` at a time. */
-class MessageReader {
-  private buffer = "";
-  private readonly pending: unknown[] = [];
-  private readonly waiters: Array<(value: unknown) => void> = [];
-
-  constructor(stream: PassThrough) {
-    stream.on("data", (chunk: Buffer) => {
-      this.buffer += chunk.toString("utf8");
-      let nl: number;
-      while ((nl = this.buffer.indexOf("\n")) !== -1) {
-        const line = this.buffer.slice(0, nl).trim();
-        this.buffer = this.buffer.slice(nl + 1);
-        if (!line) continue;
-        const message = JSON.parse(line);
-        const waiter = this.waiters.shift();
-        if (waiter) waiter(message);
-        else this.pending.push(message);
-      }
-    });
-  }
-
-  take(): Promise<unknown> {
-    const ready = this.pending.shift();
-    if (ready !== undefined) return Promise.resolve(ready);
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("timed out waiting for a message")), 2000);
-      this.waiters.push((value) => {
-        clearTimeout(timer);
-        resolve(value);
-      });
-    });
-  }
-}
 
 function makeStreams(): { input: PassThrough; output: PassThrough; reader: MessageReader } {
   const output = new PassThrough();

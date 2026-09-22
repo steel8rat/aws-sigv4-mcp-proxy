@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0
+
+- An HTTP 200 with an empty body to a JSON-RPC request is now reported to the
+  client as a `-32603` JSON-RPC error instead of being passed through. In stdio
+  mode this previously left the client waiting forever; an SSE response that
+  ends without answering the request is reported the same way. Notifications,
+  client responses, batches, `GET` and `DELETE` are unaffected.
+- New `retryEmptyResponse` option (`boolean | EmptyResponseRetryOptions`) on
+  `startSigV4Proxy`, `startStdioProxy` and both AgentCore wrappers, and a
+  `--retry-empty-response` CLI flag. Off by default: replays are at-least-once.
+- New `onWarn` option on the same entry points for non-fatal warnings (retries).
+
 ## 0.1.0
 
 Initial release. Extracted and reworked from an in-tree draft.

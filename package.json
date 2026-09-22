@@ -1,6 +1,6 @@
 {
   "name": "aws-sigv4-mcp-proxy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Bridge plain-HTTP or stdio MCP clients to AWS SigV4-gated MCP endpoints (Bedrock AgentCore, API Gateway, Lambda Function URLs).",
   "keywords": [
     "mcp",

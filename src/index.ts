@@ -18,6 +18,8 @@ export type {
   AgentCoreUrlOptions,
 } from "./agentcore.js";
 
+export type { EmptyResponseRetryOptions } from "./empty.js";
+
 export { createRequestSigner } from "./signer.js";
 export type { RequestSigner, SignableRequest, SignerConfig } from "./signer.js";
 
